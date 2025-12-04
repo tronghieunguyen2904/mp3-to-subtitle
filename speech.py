@@ -173,49 +173,143 @@ def format_timestamp(seconds):
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
+# Helper: check if a string likely starts a new sentence
+def _is_sentence_start(s: str) -> bool:
+    if not s:
+        return False
+    s = s.lstrip('「『（(　 ')  
+    if not s:
+        return False
+
+    if re.match(r'^[\u4E00-\u9FFF]', s):
+        return True
+
+    starters = ('そう', 'それ', 'じゃ', 'でも', 'では', 'あー', 'えー', 'はい', 'まあ', 'では', 'じゃあ', 'もし', 'うーん')
+    for st in starters:
+        if s.startswith(st):
+            return True
+
+    if len(s) >= 6 and re.match(r'^[ぁ-んァ-ヶ]', s):
+
+        return True
+    return False
+
+
+def _split_by_particles(text: str):
+    endings = [
+        'でしょうね', 'でしょう', 'ましょうか', 'ますか', 'ですか',
+        'ませんか','ないですか','ませんでしたか',
+        'ませんでした','でしたか','でした','ました','ますね',
+        'ですね', 'だね', 'だよね', 'かな', 'かもしれない', 'じゃない', 'よね', 'ね',
+        'ですよ', 'ください'
+    ]
+    alt = '|'.join(re.escape(e) for e in endings)
+
+    pattern = re.compile(r'(.*?(' + alt + r'))([」』）)]*)(.*)$', flags=re.DOTALL)
+    out = []
+
+    def _rec_split(t):
+        m = pattern.match(t)
+        if not m:
+            out.append(t)
+            return
+        a = (m.group(1) + m.group(3)).strip()
+        b = m.group(4).strip()
+
+        if b and _is_sentence_start(b):
+            out.append(a)
+
+            _rec_split(b)
+        else:
+
+            out.append(t)
+
+    _rec_split(text)
+
+    return [p.strip() for p in out if p and p.strip()]
+
+# Replace the punct_regex approach with this helper
+def _split_by_punctuation(text: str):
+    """
+    Split text by sentence-ending punctuation for Japanese, allowing
+    multiple punctuation chars and optional closing quotes/parens after them.
+    Returns a list of pieces (without trailing whitespace).
+    """
+    if not text:
+        return []
+
+    # pattern matches: one-or-more punctuation (。．！？!?… or ASCII .!?), then optional closers, then optional spaces
+    # we capture the end position and split there.
+    pattern = re.compile(r'[。．！？!?…\.]+[」』）\)]*\s*')
+
+    parts = []
+    last_idx = 0
+    for m in pattern.finditer(text):
+        end = m.end()
+        piece = text[last_idx:end].strip()
+        if piece:
+            parts.append(piece)
+        last_idx = end
+    # append the remainder
+    rest = text[last_idx:].strip()
+    if rest:
+        parts.append(rest)
+    return parts
+
+# Use this in split_segments_to_sentences (replace previous punct_regex/re.split usage)
 def split_segments_to_sentences(segments):
     """
-    Tách segments thành các câu riêng lẻ dựa trên dấu câu tiếng Nhật
-    Hỗ trợ: 。!?...
+    Tách segments thành các câu riêng lẻ.
+    - ưu tiên tách theo dấu câu tiếng Nhật (đa ký tự, không dùng variable-length lookbehind)
+    - nếu không tách theo dấu câu, thử tách theo các sentence-final particles / endings
     """
     new_segments = []
-    
+
     for seg in segments:
-        text = seg['text'].strip()
-        
-        sentences = re.split(r'(?<=[。!?...])\s*', text)
+        text = seg.get('text', '').strip()
+        if not text:
+            new_segments.append(seg)
+            continue
+
+        # 1) split by punctuation using safe helper
+        sentences = _split_by_punctuation(text)
         sentences = [s.strip() for s in sentences if s.strip()]
 
-        if len(sentences) == 0:
-            new_segments.append(seg)
-            continue
-
+        # 2) if didn't split (still 1 piece), try particle split
         if len(sentences) == 1:
+            particle_splits = _split_by_particles(text)
+            if len(particle_splits) > 1:
+                sentences = particle_splits
+
+        if len(sentences) <= 1:
             new_segments.append(seg)
             continue
 
+        # distribute timestamps proportionally by character count
         total_chars = sum(len(s) for s in sentences)
         duration_total = seg['end'] - seg['start']
-        
         current_time = seg['start']
-        
+
         for i, sentence in enumerate(sentences):
             if i == len(sentences) - 1:
                 sentence_duration = seg['end'] - current_time
             else:
-                char_ratio = len(sentence) / total_chars
-                sentence_duration = duration_total * char_ratio
-            
+                if total_chars == 0:
+                    sentence_duration = duration_total / len(sentences)
+                else:
+                    sentence_duration = duration_total * (len(sentence) / total_chars)
+
             end_time = current_time + sentence_duration
-            
+
             new_segments.append({
                 'start': current_time,
                 'end': end_time,
-                'text': sentence
+                'text': sentence,
+                'speaker': seg.get('speaker', 'UNKNOWN')
             })
-            
+
             current_time = end_time
-    
+
     return new_segments
 
 def write_srt(segments, output_path):
@@ -567,45 +661,142 @@ def format_timestamp(seconds):
     millis = int((seconds % 1) * 1000)
     return f"{{hours:02d}}:{{minutes:02d}}:{{secs:02d}},{{millis:03d}}"
 
+def _is_sentence_start(s: str) -> bool:
+    if not s:
+        return False
+    s = s.lstrip('「『（(　 ')  
+    if not s:
+        return False
+
+    if re.match(r'^[\u4E00-\u9FFF]', s):
+        return True
+
+    starters = ('そう', 'それ', 'じゃ', 'でも', 'では', 'あー', 'えー', 'はい', 'まあ', 'では', 'じゃあ', 'もし', 'うーん')
+    for st in starters:
+        if s.startswith(st):
+            return True
+
+    if len(s) >= 6 and re.match(r'^[ぁ-んァ-ヶ]', s):
+
+        return True
+    return False
+
+
+def _split_by_particles(text: str):
+    endings = [
+        'でしょうね', 'でしょう', 'ましょうか', 'ますか', 'ですか',
+        'ませんか','ないですか','ませんでしたか',
+        'ませんでした','でしたか','でした','ました','ますね',
+        'ですね', 'だね', 'だよね', 'かな', 'かもしれない', 'じゃない', 'よね', 'ね',
+        'ですよ', 'ください'
+    ]
+    alt = '|'.join(re.escape(e) for e in endings)
+
+    pattern = re.compile(r'(.*?(' + alt + r'))([」』）)]*)(.*)$', flags=re.DOTALL)
+    out = []
+
+    def _rec_split(t):
+        m = pattern.match(t)
+        if not m:
+            out.append(t)
+            return
+        a = (m.group(1) + m.group(3)).strip()
+        b = m.group(4).strip()
+
+        if b and _is_sentence_start(b):
+            out.append(a)
+
+            _rec_split(b)
+        else:
+
+            out.append(t)
+
+    _rec_split(text)
+
+    return [p.strip() for p in out if p and p.strip()]
+
+# Replace the punct_regex approach with this helper
+def _split_by_punctuation(text: str):
+    """
+    Split text by sentence-ending punctuation for Japanese, allowing
+    multiple punctuation chars and optional closing quotes/parens after them.
+    Returns a list of pieces (without trailing whitespace).
+    """
+    if not text:
+        return []
+
+    # pattern matches: one-or-more punctuation (。．！？!?… or ASCII .!?), then optional closers, then optional spaces
+    # we capture the end position and split there.
+    pattern = re.compile(r'[。．！？!?…\.]+[」』）\)]*\s*')
+
+    parts = []
+    last_idx = 0
+    for m in pattern.finditer(text):
+        end = m.end()
+        piece = text[last_idx:end].strip()
+        if piece:
+            parts.append(piece)
+        last_idx = end
+    # append the remainder
+    rest = text[last_idx:].strip()
+    if rest:
+        parts.append(rest)
+    return parts
+
+# Use this in split_segments_to_sentences (replace previous punct_regex/re.split usage)
 def split_segments_to_sentences(segments):
+    """
+    Tách segments thành các câu riêng lẻ.
+    - ưu tiên tách theo dấu câu tiếng Nhật (đa ký tự, không dùng variable-length lookbehind)
+    - nếu không tách theo dấu câu, thử tách theo các sentence-final particles / endings
+    """
     new_segments = []
-    
+
     for seg in segments:
-        text = seg['text'].strip()
-        
-        sentences = re.split(r'(?<=[。!?...])\s*', text)
+        text = seg.get('text', '').strip()
+        if not text:
+            new_segments.append(seg)
+            continue
+
+        # 1) split by punctuation using safe helper
+        sentences = _split_by_punctuation(text)
         sentences = [s.strip() for s in sentences if s.strip()]
 
-        if len(sentences) == 0:
-            new_segments.append(seg)
-            continue
-
+        # 2) if didn't split (still 1 piece), try particle split
         if len(sentences) == 1:
+            particle_splits = _split_by_particles(text)
+            if len(particle_splits) > 1:
+                sentences = particle_splits
+
+        if len(sentences) <= 1:
             new_segments.append(seg)
             continue
 
+        # distribute timestamps proportionally by character count
         total_chars = sum(len(s) for s in sentences)
         duration_total = seg['end'] - seg['start']
-        
         current_time = seg['start']
-        
+
         for i, sentence in enumerate(sentences):
             if i == len(sentences) - 1:
                 sentence_duration = seg['end'] - current_time
             else:
-                char_ratio = len(sentence) / total_chars
-                sentence_duration = duration_total * char_ratio
-            
+                if total_chars == 0:
+                    sentence_duration = duration_total / len(sentences)
+                else:
+                    sentence_duration = duration_total * (len(sentence) / total_chars)
+
             end_time = current_time + sentence_duration
-            
+
             new_segments.append({{
                 'start': current_time,
                 'end': end_time,
-                'text': sentence
+                'text': sentence,
+                'speaker': seg.get('speaker', 'UNKNOWN')
             }})
-            
+
             current_time = end_time
-    
+
     return new_segments
 
 def write_srt(segments, output_path):
