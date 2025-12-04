@@ -1,10 +1,11 @@
 """
-complete_mp3_to_srt.py - All-in-one MP3 to SRT Converter with CUDA Support
+complete_mp3_to_srt.py - All-in-one MP3 to SRT Converter with CUDA Support + Speaker Diarization
 
 This script provides:
 1. Select audio file (MP3, WAV, etc.)
 2. Create virtual environment and install required packages (with CUDA support)
 3. Convert audio to subtitle (SRT) with GPU acceleration
+4. Speaker diarization to separate different speakers
 
 Usage: python complete_mp3_to_srt.py
 """
@@ -211,7 +212,8 @@ def split_segments_to_sentences(segments):
             new_segments.append({
                 'start': current_time,
                 'end': end_time,
-                'text': sentence
+                'text': sentence,
+                'speaker': seg.get('speaker', 'UNKNOWN')
             })
             
             current_time = end_time
@@ -225,6 +227,12 @@ def write_srt(segments, output_path):
             start = format_timestamp(seg['start'])
             end = format_timestamp(seg['end'])
             text = seg['text'].strip()
+            speaker = seg.get('speaker', '')
+            
+            # Add speaker label if available
+            if speaker and speaker != 'UNKNOWN':
+                text = f"[{speaker}] {text}"
+            
             f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
 
 # ==================== GUI Application ====================
@@ -233,8 +241,8 @@ if TK_AVAILABLE:
     class CompleteApp:
         def __init__(self, root):
             self.root = root
-            root.title("Complete MP3 → SRT Converter (CUDA Optimized)")
-            root.geometry("950x850")
+            root.title("Complete MP3 → SRT Converter (CUDA + Speaker Diarization)")
+            root.geometry("950x900")
             
             # Detect CUDA
             self.cuda_available = detect_cuda()
@@ -307,7 +315,7 @@ if TK_AVAILABLE:
             
             # Packages to install
             tk.Label(frm, text='Packages to install (comma-separated):', font=("", 10, "bold")).pack(anchor='w')
-            default_pkgs = 'whisperx, ffmpeg-python'
+            default_pkgs = 'whisperx, pyannote.audio, ffmpeg-python'
             if not self.cuda_available:
                 default_pkgs += ', torch'
             self.pkgs_var = tk.StringVar(value=default_pkgs)
@@ -394,6 +402,32 @@ if TK_AVAILABLE:
             batch_combo.pack(side=tk.LEFT)
             tk.Label(row3, text="(Higher = faster but more VRAM)", font=("", 8), fg="gray").pack(side=tk.LEFT, padx=(10,0))
             
+            # Speaker Diarization settings
+            diarization_frame = tk.LabelFrame(frm, text="🎤 Speaker Diarization (Separate speakers in subtitles)", padx=10, pady=10)
+            diarization_frame.pack(fill=tk.X, pady=(0,15))
+            
+            self.enable_diarization_var = tk.BooleanVar(value=True)
+            tk.Checkbutton(diarization_frame, text="Enable speaker diarization", 
+                          variable=self.enable_diarization_var, font=("", 10, "bold")).pack(anchor='w')
+            
+            tk.Label(diarization_frame, text="HuggingFace token (required for pyannote):", 
+                    font=("", 9)).pack(anchor='w', pady=(5,2))
+            tk.Label(diarization_frame, text="Get token at: https://huggingface.co/settings/tokens", 
+                    font=("", 8), fg="blue").pack(anchor='w', pady=(0,5))
+            
+            token_frame = tk.Frame(diarization_frame)
+            token_frame.pack(fill=tk.X)
+            self.hf_token_var = tk.StringVar()
+            tk.Entry(token_frame, textvariable=self.hf_token_var, width=70, show="*").pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            tk.Label(diarization_frame, text="Min speakers:", font=("", 9)).pack(anchor='w', pady=(10,2))
+            self.min_speakers_var = tk.StringVar(value="1")
+            tk.Entry(diarization_frame, textvariable=self.min_speakers_var, width=10).pack(anchor='w')
+            
+            tk.Label(diarization_frame, text="Max speakers:", font=("", 9)).pack(anchor='w', pady=(5,2))
+            self.max_speakers_var = tk.StringVar(value="10")
+            tk.Entry(diarization_frame, textvariable=self.max_speakers_var, width=10).pack(anchor='w')
+            
             # Convert button
             self.convert_btn = tk.Button(frm, text="🎬 Convert to SRT",
                                         command=self.start_conversion, font=("", 11, "bold"),
@@ -406,7 +440,7 @@ if TK_AVAILABLE:
             
             # Console output
             tk.Label(frm, text="Console output:", font=("", 10, "bold")).pack(anchor='w')
-            self.convert_console = scrolledtext.ScrolledText(frm, width=90, height=12, font=("Consolas", 9))
+            self.convert_console = scrolledtext.ScrolledText(frm, width=90, height=10, font=("Consolas", 9))
             self.convert_console.pack(fill=tk.BOTH, expand=True, pady=(5,0))
         
         # Setup tab methods
@@ -483,6 +517,10 @@ if TK_AVAILABLE:
                 messagebox.showerror("Error", f"File not found: {audio_path}")
                 return
             
+            if self.enable_diarization_var.get() and not self.hf_token_var.get().strip():
+                messagebox.showwarning("Warning", "Please enter HuggingFace token for speaker diarization!")
+                return
+            
             self.convert_btn.config(state='disabled')
             self.progress.start()
             thread = threading.Thread(target=self._convert_thread)
@@ -503,15 +541,21 @@ if TK_AVAILABLE:
                     device = self.device_var.get()
                     compute_type = self.compute_var.get()
                     batch_size = self.batch_var.get()
+                    enable_diarization = self.enable_diarization_var.get()
+                    hf_token = self.hf_token_var.get().strip()
+                    min_speakers = self.min_speakers_var.get()
+                    max_speakers = self.max_speakers_var.get()
                     
                     self.log_convert("="*70)
                     self.log_convert("Starting conversion using virtual environment...")
                     if device == "cuda":
                         self.log_convert("[GPU] GPU acceleration enabled (CUDA)")
                         self.log_convert(f"[GPU] Optimized for RTX 3060 Ti: {compute_type}, batch_size={batch_size}")
+                    if enable_diarization:
+                        self.log_convert("[DIARIZATION] Speaker diarization enabled")
                     self.log_convert("="*70 + "\n")
                     
-                    # Create conversion script with CUDA optimization and Windows encoding fix
+                    # Create conversion script with speaker diarization
                     script_content = f'''# -*- coding: utf-8 -*-
 import sys
 import io
@@ -533,9 +577,8 @@ if torch.cuda.is_available():
     print("[INFO] CUDA version:", torch.version.cuda)
     print("[INFO] Number of GPUs:", torch.cuda.device_count())
 
-# Fix PyTorch weights_only issue - more robust approach
+# Fix PyTorch weights_only issue
 import torch.serialization
-# Add safe globals for WhisperX dependencies
 try:
     from omegaconf import DictConfig, ListConfig
     torch.serialization.add_safe_globals([DictConfig, ListConfig])
@@ -544,12 +587,11 @@ except:
 
 _original_load = torch.load
 def _patched_load(*args, **kwargs):
-    # Force weights_only=False for PyTorch 2.6+
     kwargs['weights_only'] = False
     return _original_load(*args, **kwargs)
 torch.load = _patched_load
 
-# Display GPU info if CUDA is available
+# Display GPU info
 if torch.cuda.is_available():
     print(f"[GPU] GPU: {{torch.cuda.get_device_name(0)}}")
     print(f"[GPU] VRAM: {{torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f}} GB")
@@ -557,7 +599,6 @@ if torch.cuda.is_available():
     print()
 else:
     print("[WARNING] CUDA not available, using CPU")
-    print("[WARNING] This will be much slower than GPU processing")
     print()
 
 def format_timestamp(seconds):
@@ -567,7 +608,53 @@ def format_timestamp(seconds):
     millis = int((seconds % 1) * 1000)
     return f"{{hours:02d}}:{{minutes:02d}}:{{secs:02d}},{{millis:03d}}"
 
+def assign_speakers_to_segments(segments, diarization_result):
+    """Assign speaker labels to transcription segments"""
+    for segment in segments:
+        segment_start = segment['start']
+        segment_end = segment['end']
+        segment_middle = (segment_start + segment_end) / 2
+        
+        # Find speaker at middle of segment
+        speaker = "UNKNOWN"
+        for turn, _, speaker_label in diarization_result.itertracks(yield_label=True):
+            if turn.start <= segment_middle <= turn.end:
+                speaker = speaker_label
+                break
+        
+        segment['speaker'] = speaker
+    
+    return segments
+
+def split_by_speaker_change(segments):
+    """Split segments when speaker changes"""
+    if not segments:
+        return segments
+    
+    new_segments = []
+    
+    for seg in segments:
+        if not new_segments:
+            new_segments.append(seg)
+            continue
+        
+        last_seg = new_segments[-1]
+        
+        # If speaker changes, create new segment
+        if seg.get('speaker') != last_seg.get('speaker'):
+            new_segments.append(seg)
+        else:
+            # Same speaker, merge if very close (< 1 second gap)
+            if seg['start'] - last_seg['end'] < 1.0:
+                last_seg['text'] += ' ' + seg['text']
+                last_seg['end'] = seg['end']
+            else:
+                new_segments.append(seg)
+    
+    return new_segments
+
 def split_segments_to_sentences(segments):
+    """Split segments by punctuation marks"""
     new_segments = []
     
     for seg in segments:
@@ -576,17 +663,12 @@ def split_segments_to_sentences(segments):
         sentences = re.split(r'(?<=[。!?...])\s*', text)
         sentences = [s.strip() for s in sentences if s.strip()]
 
-        if len(sentences) == 0:
-            new_segments.append(seg)
-            continue
-
-        if len(sentences) == 1:
+        if len(sentences) <= 1:
             new_segments.append(seg)
             continue
 
         total_chars = sum(len(s) for s in sentences)
         duration_total = seg['end'] - seg['start']
-        
         current_time = seg['start']
         
         for i, sentence in enumerate(sentences):
@@ -601,7 +683,8 @@ def split_segments_to_sentences(segments):
             new_segments.append({{
                 'start': current_time,
                 'end': end_time,
-                'text': sentence
+                'text': sentence,
+                'speaker': seg.get('speaker', 'UNKNOWN')
             }})
             
             current_time = end_time
@@ -609,11 +692,18 @@ def split_segments_to_sentences(segments):
     return new_segments
 
 def write_srt(segments, output_path):
+    """Write segments to SRT file with speaker labels"""
     with open(output_path, 'w', encoding='utf-8') as f:
         for i, seg in enumerate(segments, 1):
             start = format_timestamp(seg['start'])
             end = format_timestamp(seg['end'])
             text = seg['text'].strip()
+            speaker = seg.get('speaker', '')
+            
+            # Add speaker label
+            if speaker and speaker != 'UNKNOWN':
+                text = f"[{{speaker}}] {{text}}"
+            
             f.write(f"{{i}}\\n{{start}} --> {{end}}\\n{{text}}\\n\\n")
 
 print("Loading WhisperX...")
@@ -627,6 +717,10 @@ model_size = "{model_size}"
 device = "{device}"
 compute_type = "{compute_type}"
 batch_size = {batch_size}
+enable_diarization = {str(enable_diarization)}
+hf_token = "{hf_token}"
+min_speakers = {min_speakers}
+max_speakers = {max_speakers}
 
 # Auto-adjust settings if CUDA not available
 if device == "cuda" and not torch.cuda.is_available():
@@ -644,6 +738,7 @@ print(f"Audio file: {{audio_path}}")
 print(f"Output file: {{output_path}}")
 print(f"Model: {{model_size}}, Device: {{device}}, Compute: {{compute_type}}")
 print(f"Batch size: {{batch_size}}")
+print(f"Speaker diarization: {{enable_diarization}}")
 print()
 
 print("Loading audio...")
@@ -673,10 +768,62 @@ result = whisperx.align(
     return_char_alignments=False
 )
 
-print("Writing SRT file...")
 segments = result["segments"]
-print("Spliting SRT file...")
+
+# Speaker Diarization
+if enable_diarization and hf_token:
+    try:
+        print("\\n" + "="*70)
+        print("[DIARIZATION] Loading speaker diarization model...")
+        print("="*70)
+        
+        from pyannote.audio import Pipeline
+        
+        diarization_pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=hf_token
+        )
+        
+        if device == "cuda" and torch.cuda.is_available():
+            diarization_pipeline.to(torch.device("cuda"))
+            print("[DIARIZATION] Running on GPU")
+        else:
+            print("[DIARIZATION] Running on CPU")
+        
+        print(f"[DIARIZATION] Analyzing speakers (min={{min_speakers}}, max={{max_speakers}})...")
+        
+        diarization = diarization_pipeline(
+            audio_path,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers
+        )
+        
+        # Count unique speakers
+        unique_speakers = set()
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            unique_speakers.add(speaker)
+        
+        print(f"[DIARIZATION] Found {{len(unique_speakers)}} speakers: {{sorted(unique_speakers)}}")
+        
+        print("[DIARIZATION] Assigning speakers to segments...")
+        segments = assign_speakers_to_segments(segments, diarization)
+        
+        print("[DIARIZATION] Splitting by speaker changes...")
+        segments = split_by_speaker_change(segments)
+        
+        print("[DIARIZATION] Speaker diarization complete!")
+        print("="*70 + "\\n")
+        
+    except Exception as e:
+        print(f"[WARNING] Speaker diarization failed: {{e}}")
+        print("[WARNING] Continuing without speaker labels...")
+        import traceback
+        traceback.print_exc()
+
+print("Splitting segments by punctuation...")
 segments = split_segments_to_sentences(segments)
+
+print("Writing SRT file...")
 write_srt(segments, output_path)
 
 print(f"\\n[SUCCESS] Successfully created: {{output_path}}")
@@ -686,6 +833,11 @@ print(f"[SUCCESS] Total segments: {{len(segments)}}")
 if device == "cuda":
     del model
     del model_a
+    if enable_diarization and hf_token:
+        try:
+            del diarization_pipeline
+        except:
+            pass
     torch.cuda.empty_cache()
     print("[GPU] GPU memory cleared")
 '''
